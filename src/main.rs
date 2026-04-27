@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let analysis = analyzer.analyze(&dir)?;
 
-    println!("Result: {:#?}", analysis);
+    println!("Result: {:?}", analysis);
 
     // backup::backup(&dir)?;
 

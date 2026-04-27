@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use polars::prelude::*;
-use calamine::{open_workbook_auto, Reader, Range};
+use calamine::{open_workbook_auto, Reader, Data};
 
 #[derive(Debug)]
 pub enum TableFormat {
@@ -24,8 +24,8 @@ pub struct TableAnalysis {
 
 #[derive(Debug)]
 pub struct MissingReport {
-    pub by_column: Vec<ColumnMissing>,
-    pub by_row: Vec<RowMissing>
+    pub by_columns: Vec<ColumnMissing>,
+    pub by_rows: Vec<RowMissing>
 } 
 
 #[derive(Debug)]
@@ -37,7 +37,7 @@ pub struct ColumnMissing {
 
 #[derive(Debug)]
 pub struct RowMissing {
-    pub name: usize,
+    pub index: usize,
     pub count: usize,
     pub percent: f64,
 }
@@ -93,7 +93,7 @@ impl TableAnalyzer {
                 Ok(Self::analysis_polars_from_df(path, TableFormat::Json, df))
             }
             TableFormat::Parquet => {
-                let file = File::open(path)?;
+                let file: File = File::open(path)?;
                 let df: DataFrame = ParquetReader::new(file)
                     .finish()?;
 
@@ -106,7 +106,12 @@ impl TableAnalyzer {
                     .sheet_names()
                     .first()
                     .cloned()
-                    .ok_or("Workbook has no sheets")?;
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Workbook has no sheets",
+                        )
+                    })?;
 
                 let range: calamine::Range<calamine::Data> = workbook.worksheet_range(&sheet_name)?;
 
@@ -114,8 +119,8 @@ impl TableAnalyzer {
             }
             TableFormat::Unsupported => {
                 let missings: MissingReport = MissingReport {
-                    by_column: Vec::new(),
-                    by_row: Vec::new(),
+                    by_columns: Vec::new(),
+                    by_rows: Vec::new(),
                 };
                 Ok(TableAnalysis {
                     path: path.to_path_buf(),
@@ -141,7 +146,7 @@ impl TableAnalyzer {
             .map(|name| name.to_string())
             .collect();
 
-        let missings: MissingReport = Self::missings_from_polars(df);
+        let missings: MissingReport = Self::missings_from_polars(&df);
 
         TableAnalysis {
             path: path.to_path_buf(),
@@ -167,7 +172,7 @@ impl TableAnalyzer {
             .map(|cell| cell.to_string())
             .collect();
 
-        let missings: calamine::Range<calamine::Data> = Self::missings_from_calamine(range);
+        let missings: MissingReport = Self::missings_from_calamine(&range);
 
         TableAnalysis {
             path: path.to_path_buf(),
@@ -179,17 +184,167 @@ impl TableAnalyzer {
         }
     }
 
-    fn missings_from_polars(df: DataFrame) {
+    fn missings_from_polars(df: &DataFrame) -> MissingReport{
         let total_rows: usize = df.height();
         let total_columns: usize = df.width();
 
+        let by_columns: Vec<ColumnMissing> = df.columns()
+            .iter()
+            .map(|column| {
+                let count: usize = (0..total_rows)
+                    .filter(|row_index| {
+                        let value = column
+                            .get(*row_index)
+                            .unwrap_or(AnyValue::Null);
 
+                        Self::is_missing_polars_value(&value)
+                    })
+                    .count();
+
+                let percent: f64 = if total_rows == 0 {
+                    0.0
+                } else {
+                    (count as f64 / total_rows as f64) * 100.0
+                };
+
+                ColumnMissing {
+                    name: column.name().to_string(),
+                    count,
+                    percent,
+                }
+            })
+            .collect();
+
+        let mut by_rows: Vec<RowMissing> = Vec::new();
+
+        for row_index in 0..total_rows {
+            let mut count: usize = 0;
+
+            for column in df.columns() {
+                let value = column.get(row_index).unwrap_or(AnyValue::Null);
+
+            if Self::is_missing_polars_value(&value) {
+                count += 1;
+            }
+            }
+
+            let percent: f64 = if total_columns == 0 {
+                0.0
+            } else {
+                (count as f64 / total_columns as f64) * 100.0
+            };
+
+            by_rows.push(RowMissing {
+                index: row_index,
+                count: count,
+                percent: percent,
+            });
+        }
+
+        MissingReport {
+            by_columns: by_columns,
+            by_rows:  by_rows,
+        }
     }
 
-    fn missings_from_calamine(range: calamine::Range<calamine::Data>) {
+    fn missings_from_calamine(range: &calamine::Range<calamine::Data>) -> MissingReport {
         let total_rows: usize = range.height();
         let total_columns: usize = range.width();
 
+        let column_names: Vec<String> = range
+            .rows()
+            .next()
+            .unwrap_or(&[])
+            .iter()
+            .map(|cell| cell.to_string())
+            .collect();
 
+        let mut column_counts: Vec<usize> = vec![0; total_columns];
+
+        for row in range.rows() {
+            for column_index in 0..total_columns {
+                let is_missing = match row.get(column_index) {
+                    Some(cell) => Self::is_missing_calamine_value(cell),
+                    None => true,
+                };
+
+                if is_missing {
+                    column_counts[column_index] += 1;
+                }
+            }
+        }
+
+        let by_columns: Vec<ColumnMissing> = column_counts
+            .into_iter()
+            .enumerate()
+            .map(|(index, count)| {
+                let name: String = column_names.get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("column_{}", index));
+
+                let percent: f64 = if total_rows == 0 {
+                    0.0
+                } else {
+                    (count as f64 / total_rows as f64) * 100.0
+                };
+
+                ColumnMissing {
+                    name: name,
+                    count: count,
+                    percent: percent 
+                }
+            })
+            .collect();
+
+        let mut by_rows: Vec<RowMissing> = Vec::new();
+
+        for (row_index, row) in range.rows().enumerate() {
+            let mut count: usize = 0;
+
+            for column_index in 0..total_columns {
+                let is_missing = match row.get(column_index) {
+                    Some(cell) => Self::is_missing_calamine_value(cell),
+                    None => true,
+                };
+
+                if is_missing {
+                    count += 1;
+                }
+            }
+
+            let percent: f64 = if total_columns == 0 {
+                0.0
+            } else {
+                (count as f64 / total_columns as f64) * 100.0
+            };
+
+            by_rows.push(RowMissing {
+                index: row_index,
+                count: count,
+                percent: percent,
+            });
+        }
+
+        MissingReport {
+            by_columns: by_columns,
+            by_rows:  by_rows,
+        }
+    }
+
+    fn is_missing_polars_value(value: &AnyValue) -> bool {
+        match value {
+            AnyValue::Null => true,
+            AnyValue::String(value) => value.trim().is_empty(),
+            AnyValue::StringOwned(value) => value.as_str().trim().is_empty(),
+            _ => false,
+        }
+    }
+
+    fn is_missing_calamine_value(value: &Data) -> bool {
+        match value {
+            Data::Empty => true,
+            Data::String(s) => s.trim().is_empty(),
+            _ => false,
+        }
     }
 }
