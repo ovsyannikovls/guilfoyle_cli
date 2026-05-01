@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use tracing::info;
 
 mod scanner;
 mod backup;
@@ -10,23 +11,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("info")
         .init();
 
-    let dir: PathBuf = PathBuf::from("/home/ovsyannikovls/Downloads/monster_com-job_sample.csv");
+    let path: PathBuf = PathBuf::from("/home/ovsyannikovls-laptop/Downloads");
 
-    let analyzer = analyzer::TableAnalyzer::new();
+    // let analyzer = analyzer::TableAnalyzer::new();
 
-    let analysis = analyzer.analyze(&dir)?;
+    // let analysis = analyzer.analyze(&path)?;
 
-    println!("Result: {:?}", analysis);
+    // println!("Result: {:?}", analysis);
 
-    // backup::backup(&dir)?;
+    // backup::backup(&path)?;
 
-    // let mut scanner = Scanner::new();
+    let mut scanner = scanner::Scanner::new();
 
-    // scanner.scan(&dir)?;
+    scanner.scan(&path)?;
 
-    // let result = scanner.result();
+    let result = scanner.result();
 
-    // info!("{:#?}", result);
+    info!("{:#?}", result);
 
     Ok(())
 }
